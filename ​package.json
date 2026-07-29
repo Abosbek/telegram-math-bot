@@ -1,10 +1,10 @@
 {
-  "name": "telegram-math-emoji-bot",
+  "name": "telegram-math-bot",
   "version": "1.0.0",
-  "description": "Premium Emoji and Math Bot",
+  "description": "Matematika va LaTeX bot",
   "main": "api/bot.js",
   "dependencies": {
-    "telegraf": "^4.16.3",
-    "@libsql/client": "^0.6.0"
+    "@libsql/client": "^0.6.0",
+    "telegraf": "^4.16.3"
   }
 }
