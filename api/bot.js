@@ -1,4 +1,4 @@
-Enterconst { Telegraf, Markup } = require('telegraf');
+const { Telegraf, Markup } = require('telegraf');
 const { createClient } = require('@libsql/client');
 
 // =====================================================================
