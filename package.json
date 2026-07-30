@@ -1,4 +1,6 @@
-"dependencies": {
-  "@libsql/client": "latest",
-  "telegraf": "^4.16.3"
+{
+  "dependencies": {
+    "@libsql/client": "latest",
+    "telegraf": "^4.16.3"
+  }
 }
