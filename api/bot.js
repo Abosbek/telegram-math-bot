@@ -16,21 +16,20 @@ const SUPER_ADMIN_ID = parseInt(process.env.SUPER_ADMIN_ID);
 let isDbInitialized = false;
 
 async function initDB() {
-  if (isDbInitialized) return; // Agar Vercel xotirasida ochiq bo'lsa, qayta yaratmaydi (tezlik uchun)
-  
-  await db.executeMultiple(`
-    CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, role TEXT);
-    CREATE TABLE IF NOT EXISTS channels (username TEXT PRIMARY KEY);
-    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
-    CREATE TABLE IF NOT EXISTS favorites (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, type TEXT, content TEXT, label TEXT);
-    CREATE TABLE IF NOT EXISTS user_states (user_id INTEGER PRIMARY KEY, state TEXT, data TEXT);
-    INSERT OR IGNORE INTO settings (key, value) VALUES ('unauth_msg', '⚠️ Kechirasiz, botdan foydalanish uchun adminga murojaat qiling.');
-  `);
-  
-  if (SUPER_ADMIN_ID) {
-    await db.execute({ sql: `INSERT OR IGNORE INTO users (id, role) VALUES (?, 'admin')`, args: [SUPER_ADMIN_ID] });
-  }
-  isDbInitialized = true;
+    if (isDbInitialized) return;
+
+    if (SUPER_ADMIN_ID) {
+        try {
+            await db.execute({
+                sql: `INSERT OR IGNORE INTO users (id, role) VALUES (?, 'admin')`,
+                args: [SUPER_ADMIN_ID]
+            });
+        } catch (error) {
+            console.error("Admin qo'shishda xatolik:", error.message);
+        }
+    }
+    
+    isDbInitialized = true;
 }
 
 // =====================================================================
