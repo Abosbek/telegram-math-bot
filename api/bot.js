@@ -18,6 +18,36 @@ let isDbInitialized = false;
 async function initDB() {
     if (isDbInitialized) return;
 
+    // ✅ TUZATISH: jadvallar avval hech qachon avtomatik yaratilmagan edi.
+    // Agar siz ularni Turso konsolida qo'lda yaratgan bo'lsangiz muammo yo'q,
+    // lekin xavfsizlik uchun "IF NOT EXISTS" bilan har doim tekshirib turamiz.
+    await db.execute(`CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY,
+        role TEXT NOT NULL DEFAULT 'user'
+    );`);
+    await db.execute(`CREATE TABLE IF NOT EXISTS channels (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE
+    );`);
+    await db.execute(`CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    );`);
+    await db.execute(`CREATE TABLE IF NOT EXISTS favorites (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        content TEXT NOT NULL,
+        label TEXT
+    );`);
+    await db.execute(`CREATE TABLE IF NOT EXISTS user_states (
+        user_id INTEGER PRIMARY KEY,
+        state TEXT,
+        data TEXT
+    );`);
+    await db.execute(`INSERT OR IGNORE INTO settings (key, value) VALUES
+        ('unauth_msg', '⛔ Sizda botdan foydalanish huquqi yo''q. Administrator bilan bog''laning.');`);
+
     if (SUPER_ADMIN_ID) {
         try {
             await db.execute({
@@ -28,7 +58,7 @@ async function initDB() {
             console.error("Admin qo'shishda xatolik:", error.message);
         }
     }
-    
+
     isDbInitialized = true;
 }
 
@@ -55,6 +85,33 @@ async function clearState(userId) {
 }
 
 // =====================================================================
+// 2.1. LaTeX -> UNICODE FALLBACK (sendRichMessage ishlamay qolsa ishlatiladi)
+// =====================================================================
+const GREEK = {
+  alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ', theta: 'θ', lambda: 'λ',
+  mu: 'μ', pi: 'π', sigma: 'σ', phi: 'φ', omega: 'ω',
+};
+const SUP = { 0:'⁰',1:'¹',2:'²',3:'³',4:'⁴',5:'⁵',6:'⁶',7:'⁷',8:'⁸',9:'⁹','+':'⁺','-':'⁻' };
+const SUB = { 0:'₀',1:'₁',2:'₂',3:'₃',4:'₄',5:'₅',6:'₆',7:'₇',8:'₈',9:'₉' };
+function toScript(str, map) { return str.split('').map(c => map[c] || c).join(''); }
+
+function latexToUnicode(input) {
+  let s = input;
+  s = s.replace(/\\(sqrt|sum|int|infty|cdot|times|pm|leq|geq|neq|approx|to|rightarrow)/g, (m, w) => ({
+    sqrt:'√', sum:'∑', int:'∫', infty:'∞', cdot:'·', times:'×', pm:'±',
+    leq:'≤', geq:'≥', neq:'≠', approx:'≈', to:'→', rightarrow:'→'
+  }[w] || m));
+  s = s.replace(/\\([a-zA-Z]+)/g, (m, w) => GREEK[w] || m);
+  s = s.replace(/\^\{([^}]+)\}/g, (m, g) => toScript(g, SUP));
+  s = s.replace(/\^([0-9+\-])/g, (m, g) => toScript(g, SUP));
+  s = s.replace(/_\{([^}]+)\}/g, (m, g) => toScript(g, SUB));
+  s = s.replace(/_([0-9])/g, (m, g) => toScript(g, SUB));
+  s = s.replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g, (m, a, b) => `${a}/${b}`);
+  s = s.replace(/[{}]/g, '');
+  return s.trim();
+}
+
+// =====================================================================
 // 3. MIDDLEWARE: RUXSAT VA MAJBURIY OBUNA (ANTI-SPAM)
 // =====================================================================
 bot.use(async (ctx, next) => {
@@ -67,16 +124,15 @@ bot.use(async (ctx, next) => {
     const isAdmin = role === 'admin';
     const isUser = role === 'user';
 
-    // Ruxsatsizlarni qaytarish
     if (!isAdmin && !isUser) {
       if (ctx.message && ctx.message.text === '/start') {
         const msgRes = await db.execute(`SELECT value FROM settings WHERE key = 'unauth_msg'`);
-        return ctx.reply(msgRes.rows[0].value);
+        const text = msgRes.rows[0] ? msgRes.rows[0].value : "⛔ Sizda ruxsat yo'q.";
+        return ctx.reply(text);
       }
-      return; 
+      return;
     }
 
-    // Majburiy obunani tekshirish
     if (!isAdmin) {
       const channelsRes = await db.execute(`SELECT username FROM channels`);
       const channels = channelsRes.rows.map(r => r.username);
@@ -93,11 +149,11 @@ bot.use(async (ctx, next) => {
         if (notSubscribed.length > 0) {
           let buttons = notSubscribed.map(ch => [Markup.button.url('📢 A’zo bo‘lish', `https://t.me/${ch.replace('@', '')}`)]);
           buttons.push([Markup.button.callback('✅ Tekshirish', 'check_sub')]);
-          
+
           if (ctx.callbackQuery && ctx.callbackQuery.data === 'check_sub') {
               return ctx.answerCbQuery("Hali barcha kanallarga a'zo bo'lmagansiz!", { show_alert: true });
           } else if (ctx.callbackQuery) {
-              return; // Boshqa knopka bossa indamaydi
+              return;
           }
           return ctx.reply("Botdan foydalanish uchun quyidagi kanallarga obuna bo'lishingiz shart:", Markup.inlineKeyboard(buttons));
         } else if (ctx.callbackQuery && ctx.callbackQuery.data === 'check_sub') {
@@ -107,7 +163,7 @@ bot.use(async (ctx, next) => {
       }
     }
 
-    ctx.state.role = role; // Rolni keyingi bosqichga uzatamiz
+    ctx.state.role = role;
     return next();
   } catch (error) {
     console.error("Middleware xatosi:", error);
@@ -115,7 +171,7 @@ bot.use(async (ctx, next) => {
 });
 
 // =====================================================================
-// 4. ADMIN PANEL (BOSHQARUV)
+// 4. ADMIN PANEL (BOSHQARUV) — o'zgarishsiz qoldi
 // =====================================================================
 bot.command('admin', async (ctx) => {
   if (ctx.state.role !== 'admin') return;
@@ -143,7 +199,8 @@ bot.action('adm_users', async (ctx) => {
 bot.action('adm_msg', async (ctx) => {
   await setState(ctx.from.id, 'awaiting_start_msg');
   const msgRes = await db.execute(`SELECT value FROM settings WHERE key = 'unauth_msg'`);
-  return ctx.editMessageText(`Joriy xabar: \n\n_${msgRes.rows[0].value}_\n\nYangi ogohlantirish xabarini yuboring:`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Orqaga', 'adm_back')]])});
+  const current = msgRes.rows[0] ? msgRes.rows[0].value : '(hali o\'rnatilmagan)';
+  return ctx.editMessageText(`Joriy xabar: \n\n_${current}_\n\nYangi ogohlantirish xabarini yuboring:`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Orqaga', 'adm_back')]])});
 });
 
 bot.action('adm_channels', async (ctx) => {
@@ -162,7 +219,7 @@ bot.action('add_ch_prompt', async (ctx) => {
 bot.action(/del_ch_(.+)/, async (ctx) => {
   await db.execute({ sql: `DELETE FROM channels WHERE username = ?`, args: [ctx.match[1]] });
   await ctx.answerCbQuery("Kanal ro'yxatdan o'chirildi!");
-  return sendAdminMenu(ctx, true); // Menuga qaytarish
+  return sendAdminMenu(ctx, true);
 });
 
 bot.action('adm_stats', async (ctx) => {
@@ -189,14 +246,13 @@ bot.action('adm_back', async (ctx) => {
 bot.on('message', async (ctx, next) => {
   const text = ctx.message?.text || '';
   const userId = ctx.from.id;
-  
+
   const stateObj = await getState(userId);
 
   // --- A. KUTILAYOTGAN HOLATLAR (STATE) ---
   if (stateObj) {
     const { state, data } = stateObj;
-    
-    // ADMIN HOLATLARI
+
     if (ctx.state.role === 'admin') {
       if (state === 'awaiting_user_id') {
         const targetId = parseInt(text);
@@ -206,7 +262,7 @@ bot.on('message', async (ctx, next) => {
         return ctx.reply(`✅ ${targetId} bazaga qo'shildi! Endi u botdan foydalana oladi.`, Markup.inlineKeyboard([[Markup.button.callback('⚙️ Admin panel', 'adm_back')]]));
       }
       if (state === 'awaiting_start_msg' && text) {
-        await db.execute({ sql: `UPDATE settings SET value = ? WHERE key = 'unauth_msg'`, args: [text] });
+        await db.execute({ sql: `INSERT INTO settings (key, value) VALUES ('unauth_msg', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, args: [text] });
         await clearState(userId);
         return ctx.reply("✅ Start xabari muvaffaqiyatli yangilandi.");
       }
@@ -221,16 +277,15 @@ bot.on('message', async (ctx, next) => {
         let success = 0;
         await ctx.reply("⏳ Xabar yuborilmoqda... Bu biroz vaqt olishi mumkin.");
         for (const row of usersRes.rows) {
-          try { 
-            await ctx.telegram.copyMessage(row.id, ctx.chat.id, ctx.message.message_id); 
-            success++; 
-          } catch (e) {} // Bloklaganlarni o'tkazib yuborish
+          try {
+            await ctx.telegram.copyMessage(row.id, ctx.chat.id, ctx.message.message_id);
+            success++;
+          } catch (e) {}
         }
         return ctx.reply(`✅ Rassilka yakunlandi! Jami ${success} kishiga muvaffaqiyatli yuborildi.`);
       }
     }
 
-    // FOYDALANUVCHI HOLATLARI (Emoji Pagination)
     if (state === 'awaiting_emoji_numbers' && text) {
       let selectedIndices = [];
       try {
@@ -248,30 +303,38 @@ bot.on('message', async (ctx, next) => {
       }
 
       if (selectedIndices.length === 0) return ctx.reply("Bunday raqamdagi emojilar topilmadi. Qaytadan kiriting:");
-      
+
       let resultMsg = "✅ **Siz tanlagan Emoji ID'lar:**\n\n";
       selectedIndices.forEach(idx => { resultMsg += `${idx + 1}-emoji: <code>${data[idx].custom_emoji_id}</code>\n`; });
-      
+
       await clearState(userId);
       return ctx.replyWithHTML(resultMsg);
     }
   }
 
-  // B. GURUHLAR VA CHATLAR UCHUN NATIVE LATEX (API 10.2 Rich Messages)
+  // B. GURUHLAR VA CHATLAR UCHUN NATIVE LATEX (Bot API 10.1/10.2 Rich Messages)
   if (text.startsWith('$') || text.includes('\\frac') || text.includes('\\sqrt') || text.includes('\\int')) {
     const isGroup = ['group', 'supergroup'].includes(ctx.chat.type);
-    const cleanLatex = isGroup && text.match(/\$(.*?)\$/) ? text.match(/\$(.*?)\$/)[1] : text.replace(/^\$+|\$+$/g, '').trim(); 
-    
+    const cleanLatex = isGroup && text.match(/\$(.*?)\$/) ? text.match(/\$(.*?)\$/)[1] : text.replace(/^\$+|\$+$/g, '').trim();
+
     if (cleanLatex) {
       try {
+        // ✅ TUZATISH: "blocks" endi to'g'ridan-to'g'ri emas, balki
+        // "rich_message" obyekti ICHIDA yuborilyapti — InputRichMessage tipi shuni talab qiladi.
         await ctx.telegram.callApi('sendRichMessage', {
           chat_id: ctx.chat.id,
           reply_to_message_id: ctx.message.message_id,
-          blocks: [{ type: 'mathematical_expression', expression: cleanLatex }]
+          rich_message: {
+            blocks: [{ type: 'mathematical_expression', expression: cleanLatex }]
+          }
         });
-        return; // Muvaffaqiyatli yuborilsa shu yerda to'xtatamiz
+        return;
       } catch (error) {
-        // Eski Telegram klienti xatolari
+        // ✅ TUZATISH: xato endi konsolga chiqadi (debug uchun) va foydalanuvchi
+        // hech bo'lmasa Unicode ko'rinishdagi natijani ko'radi (jimgina yo'qolmaydi).
+        console.error('sendRichMessage xatosi:', error.response?.description || error.message);
+        await ctx.reply(`📐 ${latexToUnicode(cleanLatex)}`);
+        return;
       }
     }
   }
@@ -293,11 +356,11 @@ bot.on('message', async (ctx, next) => {
   if (text.startsWith('/save ')) {
     const parts = text.replace('/save ', '').split('|');
     if (parts.length < 2) return ctx.reply("Format xato! To'g'ri namuna:\n`/save Yurak emoji | 5411730030248888046`\n`/save Murakkab Kasr | \\frac{1}{2}`", { parse_mode: 'Markdown' });
-    
+
     const label = parts[0].trim();
     const content = parts[1].trim();
-    const type = isNaN(content.replace(/[^0-9]/g, '')) ? 'math' : 'emoji'; 
-    
+    const type = isNaN(content.replace(/[^0-9]/g, '')) ? 'math' : 'emoji';
+
     await db.execute({ sql: `INSERT INTO favorites (user_id, type, content, label) VALUES (?, ?, ?, ?)`, args: [userId, type, content, label] });
     return ctx.reply(`✅ "${label}" sevimlilarga qo'shildi!\nUni istalgan chatda chiqarish uchun quyidagicha yozing:\n\n\`@${ctx.botInfo.username} fav\``, { parse_mode: 'Markdown' });
   }
@@ -311,14 +374,13 @@ bot.on('message', async (ctx, next) => {
 bot.on('inline_query', async (ctx) => {
   const query = ctx.inlineQuery.query.trim();
   const userId = ctx.from.id;
-  
+
   try {
     const userRes = await db.execute({ sql: `SELECT role FROM users WHERE id = ?`, args: [userId] });
     if (userRes.rows.length === 0) return ctx.answerInlineQuery([], { button: { text: "Foydalanish ruxsati yo'q", start_parameter: "unauth" } });
 
     let results = [];
 
-    // 1. Sevimlilarni ko'rsatish
     if (query.toLowerCase() === 'fav') {
       const favRes = await db.execute({ sql: `SELECT * FROM favorites WHERE user_id = ?`, args: [userId] });
       results = favRes.rows.map((fav, index) => {
@@ -329,23 +391,30 @@ bot.on('inline_query', async (ctx) => {
           };
         } else {
           return {
-            type: 'article', id: `fav_${index}`, title: fav.label, description: 'Matematik Formula (Rich Message)',
-            input_message_content: { blocks: [{ type: 'mathematical_expression', expression: fav.content }] }
+            type: 'article', id: `fav_${index}`, title: fav.label, description: 'Matematik Formula',
+            // ✅ TUZATISH: agar rich_message ba'zi klientlarda ko'rinmasa,
+            // Unicode fallback matnini "description" o'rniga to'g'ridan-to'g'ri
+            // yubormoqchi bo'lsangiz, quyidagi qatorni almashtiring:
+            // input_message_content: { message_text: latexToUnicode(fav.content) }
+            input_message_content: { rich_message: { blocks: [{ type: 'mathematical_expression', expression: fav.content }] } }
           };
         }
       });
-    } 
-    // 2. Yozilgan LaTeX ni formula qilish
+    }
     else if (query.includes('\\') || query.startsWith('$')) {
       const cleanMath = query.replace(/^\$+|\$+$/g, '').trim();
       if (cleanMath) {
         results.push({
           type: 'article', id: 'math_' + Date.now(), title: '📐 Matematik formula (Native)', description: cleanMath,
-          input_message_content: { blocks: [{ type: 'mathematical_expression', expression: cleanMath }] }
+          input_message_content: { rich_message: { blocks: [{ type: 'mathematical_expression', expression: cleanMath }] } }
+        });
+        // Zaxira variant: agar klient native formatni qo'llab-quvvatlamasa
+        results.push({
+          type: 'article', id: 'math_unicode_' + Date.now(), title: '📐 Formula (Unicode, universal)', description: latexToUnicode(cleanMath),
+          input_message_content: { message_text: latexToUnicode(cleanMath) }
         });
       }
     }
-    // 3. Premium Emoji (Masalan: 5411730030248888046 Salom)
     else if (query.match(/^\d{10,}/)) {
       const spaceIndex = query.indexOf(' ');
       let emojiId = query;
@@ -367,18 +436,24 @@ bot.on('inline_query', async (ctx) => {
 });
 
 // =====================================================================
+// 6.1. XATOLIKLARNI GLOBAL QAYTA ISHLASH (avval umuman yo'q edi)
+// =====================================================================
+bot.catch((err, ctx) => {
+  console.error(`Bot xatosi (${ctx.updateType}):`, err);
+});
+
+// =====================================================================
 // 7. VERCEL SERVERLESS HTTP HANDLER
 // =====================================================================
 module.exports = async (req, res) => {
   try {
-    await initDB(); 
+    await initDB();
 
-    // Telegram'dan kelgan ma'lumotlarni qayta ishlash
     if (req.method === 'POST') {
       if (req.body) {
         await bot.handleUpdate(req.body);
       }
-      res.status(200).send('OK'); // Telegram'ga OK berish shart
+      res.status(200).send('OK');
     } else {
       res.status(200).send('Vercel bot aktiv holatda. Webhook kutmoqda...');
     }
@@ -387,3 +462,4 @@ module.exports = async (req, res) => {
     res.status(500).send('Server Error');
   }
 };
+
