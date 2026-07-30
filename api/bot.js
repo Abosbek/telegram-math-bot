@@ -128,7 +128,23 @@ bot.use(async (ctx, next) => {
       if (ctx.message && ctx.message.text === '/start') {
         const msgRes = await db.execute(`SELECT value FROM settings WHERE key = 'unauth_msg'`);
         const text = msgRes.rows[0] ? msgRes.rows[0].value : "⛔ Sizda ruxsat yo'q.";
-        return ctx.reply(text);
+        await ctx.reply(text);
+
+        // Adminga faqat BIRINCHI marta bildirishnoma yuboramiz (spam bo'lmasligi uchun),
+        // shu bois foydalanuvchini 'pending' sifatida belgilab qo'yamiz.
+        if (role !== 'pending' && SUPER_ADMIN_ID) {
+          await db.execute({ sql: `INSERT OR REPLACE INTO users (id, role) VALUES (?, 'pending')`, args: [userId] });
+          try {
+            await ctx.telegram.sendMessage(
+              SUPER_ADMIN_ID,
+              `🔔 Yangi foydalanuvchi botga kirmoqchi:\n🆔 ID: <code>${userId}</code>\n👤 Ism: ${ctx.from.first_name || '—'}\n🔗 Username: ${ctx.from.username ? '@' + ctx.from.username : '—'}`,
+              { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '✅ Ruxsat berish', callback_data: `quickgrant_${userId}` }]] } }
+            );
+          } catch (e) {
+            console.error('Admin bildirishnomasi xatosi:', e.message);
+          }
+        }
+        return;
       }
       return;
     }
@@ -191,12 +207,25 @@ async function sendAdminMenu(ctx, edit = false) {
   return ctx.reply(text, { parse_mode: 'Markdown', ...keyboard });
 }
 
+// ✅ TUZATISH: har bir admin action'i endi rolni tekshiradi.
+// Avval bu tekshiruv yo'q edi — callback_data'ni bilgan har qanday odam
+// (masalan, guruhda ko'rilgan eski xabar orqali) admin panelga kira olardi.
+function requireAdmin(ctx) {
+  if (!ctx.state || ctx.state.role !== 'admin') {
+    ctx.answerCbQuery('⛔ Bu bo\'lim faqat admin uchun.', { show_alert: true }).catch(() => {});
+    return false;
+  }
+  return true;
+}
+
 bot.action('adm_users', async (ctx) => {
+  if (!requireAdmin(ctx)) return;
   await setState(ctx.from.id, 'awaiting_user_id');
   return ctx.editMessageText("Mijozning Telegram ID raqamini yuboring:", Markup.inlineKeyboard([[Markup.button.callback('🔙 Orqaga', 'adm_back')]]));
 });
 
 bot.action('adm_msg', async (ctx) => {
+  if (!requireAdmin(ctx)) return;
   await setState(ctx.from.id, 'awaiting_start_msg');
   const msgRes = await db.execute(`SELECT value FROM settings WHERE key = 'unauth_msg'`);
   const current = msgRes.rows[0] ? msgRes.rows[0].value : '(hali o\'rnatilmagan)';
@@ -204,6 +233,7 @@ bot.action('adm_msg', async (ctx) => {
 });
 
 bot.action('adm_channels', async (ctx) => {
+  if (!requireAdmin(ctx)) return;
   const chRes = await db.execute(`SELECT username FROM channels`);
   let buttons = chRes.rows.map(r => [Markup.button.callback(`❌ O'chirish: ${r.username}`, `del_ch_${r.username}`)]);
   buttons.push([Markup.button.callback('➕ Kanal qo‘shish', 'add_ch_prompt')]);
@@ -212,17 +242,20 @@ bot.action('adm_channels', async (ctx) => {
 });
 
 bot.action('add_ch_prompt', async (ctx) => {
+  if (!requireAdmin(ctx)) return;
   await setState(ctx.from.id, 'awaiting_channel');
   return ctx.editMessageText("Kanal username'ini @ bilan yuboring:", Markup.inlineKeyboard([[Markup.button.callback('🔙 Orqaga', 'adm_channels')]]));
 });
 
 bot.action(/del_ch_(.+)/, async (ctx) => {
+  if (!requireAdmin(ctx)) return;
   await db.execute({ sql: `DELETE FROM channels WHERE username = ?`, args: [ctx.match[1]] });
   await ctx.answerCbQuery("Kanal ro'yxatdan o'chirildi!");
   return sendAdminMenu(ctx, true);
 });
 
 bot.action('adm_stats', async (ctx) => {
+  if (!requireAdmin(ctx)) return;
   const usersRes = await db.execute(`SELECT COUNT(*) as count FROM users WHERE role = 'user'`);
   return ctx.editMessageText(`📊 Ruxsat etilgan foydalanuvchilar: ${usersRes.rows[0].count} ta`, Markup.inlineKeyboard([
     [Markup.button.callback('✉️ Hammaga xabar (Rassilka)', 'adm_broadcast')],
@@ -231,14 +264,140 @@ bot.action('adm_stats', async (ctx) => {
 });
 
 bot.action('adm_broadcast', async (ctx) => {
+  if (!requireAdmin(ctx)) return;
   await setState(ctx.from.id, 'awaiting_broadcast');
   return ctx.editMessageText("Barcha mijozlarga yuboriladigan xabarni (matn, rasm, video) tashlang:", Markup.inlineKeyboard([[Markup.button.callback('🔙 Orqaga', 'adm_back')]]));
 });
 
 bot.action('adm_back', async (ctx) => {
+  if (!requireAdmin(ctx)) return;
   await clearState(ctx.from.id);
   await sendAdminMenu(ctx, true);
 });
+
+// =====================================================================
+// 4.1. QO'LLANMA MATNI (/start va /help uchun umumiy)
+// =====================================================================
+function buildGuideText(ctx) {
+  const botUsername = ctx.botInfo ? ctx.botInfo.username : 'bot_username';
+  let text =
+`👋 Assalomu alaykum, ${ctx.from.first_name}!
+
+Men Premium Emoji ID va matematik formulalarni chiroyli formatlashda yordam beruvchi botman.
+
+📐 <b>1. Formula (LaTeX) — shaxsiy chatda</b>
+Menga to'g'ridan-to'g'ri shunday yozing:
+<code>$x^2 + y^2 = z^2$</code>
+<code>$\\frac{1}{2}$</code>
+<code>$\\sqrt{16} = 4$</code>
+
+📢 <b>2. Formula — guruhda</b>
+Meni guruhga admin qilib qo'shing. Guruh a'zolari <code>$...$</code> ichida formula yozsa, men avtomatik javob (reply) qilib formatlab beraman — buyruq shart emas.
+
+🔄 <b>3. Inline rejim (istalgan chatda)</b>
+Istalgan chatga shunday yozing:
+<code>@${botUsername} $x^2+2x+1$</code>
+Yuqorida chiqqan variantlardan birini bosib yuborasiz.
+
+😀 <b>4. Premium Emoji ID olish</b>
+Menga emoji to'plami linkini yuboring:
+<code>t.me/addemoji/nomi</code>
+Men to'plamdagi emojilar sonini aytaman, siz esa kerakli raqamlarni yozasiz (masalan: <code>1, 5, 10-12</code>).
+
+⭐ <b>5. Sevimlilarga saqlash</b>
+<code>/save Kvadrat tenglama | x^2+bx+c=0</code>
+Keyin istalgan joyda: <code>@${botUsername} fav</code>
+
+📋 <b>Buyruqlar</b>
+/start — asosiy menyuni ochish
+/save nomi | mazmun — sevimlilarga saqlash
+
+ℹ️ Bu qo'llanmani istalgan vaqt "🔙 Orqaga" → "📖 Qo'llanma" tugmalari orqali qayta ko'rishingiz mumkin.`;
+
+  if (ctx.state && ctx.state.role === 'admin') {
+    text += `\n\n🛠 Siz Adminsiz — boshqaruv uchun /admin buyrug'ini yuboring.`;
+  }
+  return text;
+}
+
+// =====================================================================
+// 4.2. ASOSIY MENYU (tugmalar) VA /start BUYRUG'I
+// =====================================================================
+function mainMenuKeyboard(ctx) {
+  const buttons = [
+    [Markup.button.callback('📖 Qo\'llanma', 'show_guide')],
+    [Markup.button.callback('⭐ Sevimlilarim', 'my_favs'), Markup.button.callback('🆔 Mening ID im', 'my_id')],
+  ];
+  if (ctx.state && ctx.state.role === 'admin') {
+    buttons.push([Markup.button.callback('🛠 Admin panel', 'adm_back')]);
+  }
+  return Markup.inlineKeyboard(buttons);
+}
+
+bot.start(async (ctx) => {
+  // Bu yergacha middleware ruxsatni allaqachon tekshirib bo'lgan
+  // (ruxsatsiz/blok/majburiy obuna holatlari middleware'da to'xtatiladi).
+  await ctx.reply(
+    `👋 Assalomu alaykum, ${ctx.from.first_name}!\n\nQuyidagi bo'limlardan birini tanlang:`,
+    mainMenuKeyboard(ctx)
+  );
+});
+
+bot.action('menu_back', async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.editMessageText(
+    `👋 Salom, ${ctx.from.first_name}! Quyidagi bo'limlardan birini tanlang:`,
+    mainMenuKeyboard(ctx)
+  );
+});
+
+bot.action('show_guide', async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.editMessageText(buildGuideText(ctx), {
+    parse_mode: 'HTML',
+    ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Orqaga', 'menu_back')]]),
+  });
+});
+
+bot.action('my_id', async (ctx) => {
+  await ctx.answerCbQuery(`🆔 Sizning Telegram ID'ingiz: ${ctx.from.id}`, { show_alert: true });
+});
+
+async function renderFavoritesList(ctx, edit = true) {
+  const favRes = await db.execute({ sql: `SELECT * FROM favorites WHERE user_id = ?`, args: [ctx.from.id] });
+  if (favRes.rows.length === 0) {
+    const text = "⭐ Sizda hali sevimlilar yo'q.\n\nQo'shish uchun: <code>/save nomi | mazmun</code>";
+    const kb = Markup.inlineKeyboard([[Markup.button.callback('🔙 Orqaga', 'menu_back')]]);
+    return edit ? ctx.editMessageText(text, { parse_mode: 'HTML', ...kb }) : ctx.reply(text, { parse_mode: 'HTML', ...kb });
+  }
+  const buttons = favRes.rows.map(f => [Markup.button.callback(`❌ ${f.label}`, `delfav_${f.id}`)]);
+  buttons.push([Markup.button.callback('🔙 Orqaga', 'menu_back')]);
+  const text = "⭐ Sevimlilaringiz ro'yxati (o'chirish uchun bosing):";
+  return edit ? ctx.editMessageText(text, Markup.inlineKeyboard(buttons)) : ctx.reply(text, Markup.inlineKeyboard(buttons));
+}
+
+bot.action('my_favs', async (ctx) => {
+  await ctx.answerCbQuery();
+  await renderFavoritesList(ctx, true);
+});
+
+bot.action(/delfav_(\d+)/, async (ctx) => {
+  await db.execute({ sql: `DELETE FROM favorites WHERE id = ? AND user_id = ?`, args: [Number(ctx.match[1]), ctx.from.id] });
+  await ctx.answerCbQuery("🗑 O'chirildi");
+  await renderFavoritesList(ctx, true);
+});
+
+// Admin'ga ruxsatsiz /start urinishi haqida kelgan bildirishnomadan
+// bevosita "✅ Ruxsat berish" tugmasi orqali whitelist qilish.
+bot.action(/quickgrant_(\d+)/, async (ctx) => {
+  if (!ctx.state || ctx.state.role !== 'admin') return ctx.answerCbQuery('⛔ Ruxsat yo\'q');
+  const targetId = Number(ctx.match[1]);
+  await db.execute({ sql: `INSERT OR REPLACE INTO users (id, role) VALUES (?, 'user')`, args: [targetId] });
+  await ctx.answerCbQuery('✅ Ruxsat berildi');
+  await ctx.editMessageReplyMarkup({ inline_keyboard: [[{ text: `✅ Ruxsat berilgan (ID: ${targetId})`, callback_data: 'noop' }]] });
+});
+
+bot.action('noop', async (ctx) => ctx.answerCbQuery());
 
 // =====================================================================
 // 5. MATN, EMOJI VA LATEX XABARLARNI QAYTA ISHLASH
@@ -462,4 +621,3 @@ module.exports = async (req, res) => {
     res.status(500).send('Server Error');
   }
 };
-
